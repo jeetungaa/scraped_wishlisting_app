@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Container, Typography, TextField, Button, Card, CardMedia, CardContent, Grid } from "@mui/material";
 import axios from "axios";
 import { useNavigate } from "react-router-dom";
+import AIAssistant from '../components/AIAssistant';
 
 const ProductSearchPage = () => {
   const [product, setProduct] = useState("");
@@ -102,6 +103,7 @@ const ProductSearchPage = () => {
           </Grid>
         ))}
       </Grid>
+      <AIAssistant/>
     </Container>
   );
 };

@@ -11,20 +11,58 @@ from flask import Flask, request, jsonify
 from flask import make_response
 from flask_login import login_required
 import requests
+from celery import Celery
 import sqlite3
 import jwt as pyjwt
 import datetime
 from flask_cors import CORS
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from flask_mail import Mail
+from celery.schedules import crontab
+from flask import request, jsonify
+from collections import OrderedDict
+
+
+
 
 app = Flask(__name__)
 app.secret_key = 'a03d88a45f8a4e19bb2e5c1de12fa654'  # Change this to a secure secret key
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///database.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
+# app.config['MAIL_SERVER'] = 'smtp.gmail.com'  # Or your SMTP server
+# app.config['MAIL_PORT'] = 587
+# app.config['MAIL_USE_TLS'] = True
+# app.config['MAIL_USERNAME'] = 'vaasumarothia45@gmail.com'  # Your email
+# app.config['MAIL_PASSWORD'] = 'ywvp fntr qcui xnpj'  # App-specific password
+# app.config['MAIL_DEFAULT_SENDER'] = 'vaasumarothia45@gmail.com'
+
+app.config['HUGGINGFACE_API_KEY'] = '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' 
+app.config['AI_MODEL'] = 'mistralai/Mistral-7B-Instruct-v0.1'  # Primary model
+app.config['AI_MODEL_BACKUP'] = 'HuggingFaceH4/zephyr-7b-beta'
+
+
+mail = Mail(app)
+
 db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 CORS(app, resources={r"/*": {"origins": "http://localhost:5173"}}, supports_credentials=True)
+
+def make_celery(app):
+    celery = Celery(app.import_name, backend='redis://localhost:6379/0', broker='redis://localhost:6379/0')
+    celery.conf.update(app.config)
+    return celery
+
+celery = make_celery(app)
+celery.conf.beat_schedule = {
+    'check-prices-every-day': {
+        'task': 'app.check_price_changes',
+        'schedule': crontab(hour=12, minute=0),  # Run daily at noon
+    },
+}
 
 # Function to connect to the database
 def get_db_connection():
@@ -37,6 +75,7 @@ class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(200), nullable=False)
+    # email = db.Column(db.String(120), unique=True, nullable=False)
 
 class Wishlist(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -46,18 +85,19 @@ class Wishlist(db.Model):
     image = db.Column(db.String(300))
     description = db.Column(db.String(500))
     site = Column(String, nullable=False)
+
+class PriceHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    wishlist_id = db.Column(db.Integer, db.ForeignKey('wishlist.id'), nullable=False)
+    price = db.Column(db.String(50), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.datetime.utcnow)
+
     
 
 @login_manager.user_loader
 def load_user(user_id):
     return db.session.get(User, int(user_id))
 
-# def add_user_to_db(username, password):
-#     conn = sqlite3.connect("database.db")
-#     cursor = conn.cursor()
-#     cursor.execute("INSERT INTO users (username, password) VALUES (?, ?)", (username, generate_password_hash(password)))
-#     conn.commit()
-#     conn.close()
 def add_user_to_db(username, password):
     try:
         hashed_password = generate_password_hash(password)
@@ -68,18 +108,165 @@ def add_user_to_db(username, password):
         print(f"Error adding user: {e}")
         db.session.rollback()
 
-    
-
-
-# def get_user_from_db(username):
-#     conn = sqlite3.connect("database.db")
-#     cursor = conn.cursor()
-#     cursor.execute("SELECT * FROM users WHERE username=?", (username,))
-#     user = cursor.fetchone()
-#     conn.close()
-#     return user
 def get_user_from_db(username):
     return User.query.filter_by(username=username).first()
+
+
+# price drop function ...........
+def send_price_drop_email(user, item, old_price, new_price):
+    try:
+        subject = f"Price Drop Alert for {item.description}"
+        body = f"""
+        Hello {user.username},
+        
+        The price for {item.description} has dropped!
+        
+        Old Price: {old_price}
+        New Price: {new_price}
+        
+        Check it out here: {item.link}
+        
+        Happy Shopping!
+        """
+        
+        msg = MIMEMultipart()
+        msg['Subject'] = subject
+        msg['From'] = app.config['MAIL_DEFAULT_SENDER']
+        msg['To'] = user.email
+        
+        msg.attach(MIMEText(body, 'plain'))
+        
+        with smtplib.SMTP(app.config['MAIL_SERVER'], app.config['MAIL_PORT']) as server:
+            server.starttls()
+            server.login(app.config['MAIL_USERNAME'], app.config['MAIL_PASSWORD'])
+            server.send_message(msg)
+            
+    except Exception as e:
+        print(f"Error sending email: {e}")
+
+
+def get_local_response(user_message):
+    lower_msg = user_message.lower().strip()
+    
+    # Greetings
+    if any(g in lower_msg for g in ["hi", "hello", "hey"]):
+        return "Hello! I'm your shopping assistant. How can I help today?"
+    
+    if "how are you" in lower_msg:
+        return "I'm an AI, so I'm always ready to help you shop smarter!"
+    
+    if any(t in lower_msg for t in ["thank", "thanks"]):
+        return "You're welcome! Happy to help with your shopping needs."
+    
+    # Product Comparisons - More flexible matching
+    if ("iphone" in lower_msg and "13" in lower_msg and "14" in lower_msg) or ("compare iphone" in lower_msg):
+        return """📱 iPhone 13 vs 14:
+
+• Camera: iPhone 14 has better low-light photos
+• Battery: iPhone 14 lasts 1 hour longer
+• Price: 
+  - iPhone 13: ₹59,900
+  - iPhone 14: ₹79,900
+• Best for: iPhone 14 if you want better camera, iPhone 13 for value"""
+    
+    if "smartwatch" in lower_msg or "smart watch" in lower_msg:
+        if any(price_term in lower_msg for price_term in ["under", "₹", "rs", "rupee"]):
+            return """⌚ Best Smartwatches Under ₹15,000:
+
+1. Amazfit GTS 4 (₹12,999) - Best overall
+2. Fire-Boltt Invincible (₹1,999) - Budget pick
+3. Noise ColorFit Pro 4 (₹3,999) - Best display
+
+🔗 Check Flipkart/Amazon for current deals"""
+        else:
+            return "Here are some popular smartwatch brands: Apple, Samsung, Amazfit. Ask me about specific models or price ranges!"
+    
+    # Shopping Help - More flexible matching
+    if any(k in lower_msg for k in ["product", "item", "search"]):
+        return "You can search for any product above. I'll compare prices across stores."
+    
+    if any(k in lower_msg for k in ["price", "cost", "₹", "rs", "rupee"]):
+        return "Add items to your wishlist to track price drops automatically."
+    
+    # Handle single product mentions
+    if "iphone 13" in lower_msg:
+        return "The iPhone 13 (128GB) is currently priced around ₹59,900 in India. Would you like to compare it with other models?"
+    
+    if "iphone 14" in lower_msg:
+        return "The iPhone 14 (128GB) costs approximately ₹79,900 in India. Would you like to compare features with other iPhones?"
+    
+    # Final fallback with more suggestions
+    return ("I can help with:\n"
+            "- Product comparisons (e.g. 'Compare iPhone 13 and 14')\n"
+            "- Price information (e.g. 'iPhone 13 price')\n"
+            "- Recommendations (e.g. 'Best smartwatch under ₹15,000')")
+
+# 2. AI Fallback with proper error handling
+def query_ai(user_message):
+    try:
+        headers = {
+            "Authorization": f"Bearer {app.config['HUGGINGFACE_API_KEY']}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "inputs": f"""<s>[INST] <<SYS>>
+            You are an expert shopping assistant for Indian customers.
+            Today is {datetime.date.today()}.
+            Give concise, factual answers with prices in INR.
+            <</SYS>>
+            {user_message} [/INST]""",
+            "parameters": {"max_new_tokens": 200}
+        }
+        
+        response = requests.post(
+            f"https://api-inference.huggingface.co/models/{app.config['AI_MODEL']}",
+            headers=headers,
+            json=payload,
+            timeout=8  # 8 second timeout
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if isinstance(result, list):
+                return result[0]['generated_text'].split('[/INST]')[-1].strip()
+    
+    except Exception as e:
+        print(f"AI Error: {str(e)}")
+    return None
+
+# 3. The Final Endpoint
+@app.route('/ai-assistant', methods=['POST', 'OPTIONS'])
+def ai_assistant():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        response.headers.add("Access-Control-Allow-Methods", "POST")
+        return response
+
+    data = request.get_json()
+    user_message = data.get('message', '').strip()
+    
+    if not user_message:
+        return jsonify({"error": "Empty message"}), 400
+
+    # Step 1: Always try local response first
+    local_response = get_local_response(user_message)
+    if local_response:
+        return jsonify({"response": local_response}), 200
+
+    # Step 2: Only use AI if local response wasn't specific
+    ai_response = query_ai(user_message)
+    if ai_response:
+        return jsonify({"response": ai_response}), 200
+
+    # Step 3: Ultimate fallback (should never happen)
+    return jsonify({
+        "response": "Please ask about products or shopping help. For example:\n"
+        "- 'Compare iPhone 13 and 14'\n"
+        "- 'Best smartwatch under ₹15,000'"
+    }), 200
 
 
 
@@ -522,24 +709,102 @@ def get_wishlist():
         } for item in wishlist_items])
     except Exception as e:
         return e
-
-
-# Delete item from wishlist
+    
 @app.route("/wishlist/<int:item_id>", methods=["DELETE"])
 def delete_wishlist_item(item_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM wishlist WHERE id = ?", (item_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({"message": "Item removed from wishlist"}), 200
+    token = request.headers.get("Authorization")
+    if not token:
+        return jsonify({"message": "Token is missing"}), 401
+    
+    try:
+        # Verify the token and get user
+        token = token.split(" ")[1]
+        decoded_token = pyjwt.decode(token, app.secret_key, algorithms=["HS256"])
+        user_username = decoded_token["user"]
+        user = User.query.filter_by(username=user_username).first()
+        if not user:
+            return jsonify({"message": "User not found"}), 404
+
+        # Find the item and verify it belongs to the user
+        item = Wishlist.query.filter_by(id=item_id, user_id=user.id).first()
+        if not item:
+            return jsonify({"message": "Item not found or doesn't belong to user"}), 404
+
+        # Delete the item
+        db.session.delete(item)
+        db.session.commit()
+
+        return jsonify({"message": "Item removed from wishlist"}), 200
+
+    except pyjwt.ExpiredSignatureError:
+        return jsonify({"message": "Token has expired"}), 401
+    except pyjwt.InvalidTokenError:
+        return jsonify({"message": "Invalid token"}), 401
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"message": f"An error occurred: {str(e)}"}), 500
+
+@celery.task
+def check_price_changes():
+    with app.app_context():
+        wishlist_items = Wishlist.query.all()
+
+        for item in wishlist_items:
+            user = User.query.get(item.user_id)
+            if not user:
+                continue
+
+            old_price = item.price
+            updated_price = None
+            if item.site == "Amazon":
+                updated_data = scrape_amazon(item.description)
+            elif item.site == "Flipkart":
+                updated_data = scrape_flipkart(item.description)
+            elif item.site == "Myntra":
+                updated_data = scrape_myntra(item.description)
+            elif item.site == "Snapdeal":
+                updated_data = scrape_snapdeal(item.description)
+            elif item.site == "Ajio":
+                updated_data = scrape_ajio(item.description)
+            elif item.site == "Jiomart":
+                updated_data = scrape_jiomart(item.description)
+            elif item.site == "eBay":
+                updated_data = scrape_ebay(item.description)
+            elif item.site == "Nykaa":
+                updated_data = scrape_nykaa(item.description)
+            elif item.site == "Meesho":
+                updated_data = scrape_meesho(item.description)
+            else:
+                continue
+
+            if updated_data and updated_data['price'] != old_price:
+                # Store new price in history
+                price_entry = PriceHistory(wishlist_id=item.id, price=updated_data['price'])
+                db.session.add(price_entry)
+
+                #update wishlist
+                item.price = updated_data['price']
+                db.session.commit()
+
+                if is_price_dropped(item.id):
+                    send_price_drop_email(user, item, old_price, updated_data['price'])
+
+
+# Function to check if price has dropped
+def is_price_dropped(wishlist_id):
+    price_entries = PriceHistory.query.filter_by(wishlist_id=wishlist_id).order_by(PriceHistory.timestamp.desc()).limit(2).all()
+    if len(price_entries) < 2:
+        return False  # Not enough data to compare
+    return float(price_entries[-1].price.replace("₹", "").replace(",", "")) < float(price_entries[-2].price.replace("₹", "").replace(",", ""))
+
+
 
 
 
 
 
 if __name__ == '__main__':
-    with app.app_context():  # Wrap it in an application context
+    with app.app_context():  
         db.create_all()  
         print("Database initialized successfully!")
     app.run(debug=True)

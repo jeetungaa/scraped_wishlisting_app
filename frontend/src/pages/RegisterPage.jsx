@@ -4,7 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import axios from "axios";
 
 const RegisterPage = () => {
-  const [credentials, setCredentials] = useState({ username: "", password: "" });
+  const [credentials, setCredentials] = useState({ username: "", password: ""});
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const navigate = useNavigate();
@@ -47,6 +47,15 @@ const RegisterPage = () => {
           onChange={handleChange}
           required
         />
+        {/* <TextField
+          label="Email"
+          variant="outlined"
+          type="email"
+          name="email"
+          value={credentials.email}
+          onChange={handleChange}
+          required
+        /> */}
         <TextField
           label="Password"
           variant="outlined"
